@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"> 
+    <title>Quái Vật Kiểm Tra Công Khai</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght=400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --neon-color: #33ccff; /* Neon Blue */
+        }
+        body { font-family: 'Inter', sans-serif; }
+        
+        /* Star Field Background (Space Theme) */
+        .starry-background {
+            background-color: #0d1117; 
+            background-image: radial-gradient(white, rgba(255,255,255,.2) 2px, transparent 40px),
+                              radial-gradient(white, rgba(255,255,255,.15) 1px, transparent 30px),
+                              radial-gradient(white, rgba(255,255,255,.1) 3px, transparent 60px);
+            background-size: 550px 550px, 350px 350px, 250px 250px;
+            background-position: 0 0, 40px 60px, 130px 270px;
+            animation: star-move 300s linear infinite;
+        }
+
+        @keyframes star-move {
+            from { background-position: 0 0, 40px 60px, 130px 270px; }
+            to { background-position: 550px 550px, 390px 610px, 380px 820px; }
+        }
+
+        /* Card and Text Styling */
+        .quiz-card { 
+            background-color: #161b22; 
+            box-shadow: 0 0 25px #0d6efd; 
+            border: 1px solid #0d6efd;
+        }
+        .neon-title {
+            color: var(--neon-color);
+            text-shadow: 0 0 5px var(--neon-color), 0 0 10px var(--neon-color);
+        }
+        .btn-primary {
+            background-color: var(--neon-color);
+            color: #0d1117;
+            font-weight: bold;
+            box-shadow: 0 0 10px rgba(var(--neon-color), 0.5);
+            min-height: 48px; /* Đảm bảo vùng chạm lớn cho mobile */
+        }
+        .btn-primary:hover {
+            background-color: #00aaff;
+            box-shadow: 0 0 15px #00aaff;
+        }
+        .option-button {
+            min-height: 48px; 
+            display: flex; 
+            align-items: center;
+        }
+        #timer-display.low-time {
+            color: #ff4d4d;
+            text-shadow: 0 0 5px #ff4d4d, 0 0 10px #ff0000;
+        }
+    </style>
+    <!-- Tải Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, orderBy, onSnapshot, addDoc, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Bật chế độ Debug cho Firebase
+        setLogLevel('Debug');
+
+        // --- Hằng số Toàn cục (Cung cấp bởi môi trường Canvas) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        // 1. KHỞI TẠO FIREBASE VÀ XÁC THỰC
+        async function initializeFirebase() {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Lắng nghe trạng thái xác thực
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('userIdDisplay').textContent = userId;
+                        document.getElementById('start-button').disabled = false;
+                        isAuthReady = true;
+                        setupLeaderboardListener(); // Bắt đầu lắng nghe BXH
+                    } else {
+                        // Thử đăng nhập nếu chưa có người dùng
+                        await handleSignIn();
+                    }
+                });
+            } catch (error) {
+                console.error("Lỗi khi khởi tạo Firebase:", error);
+                document.getElementById('userIdDisplay').textContent = `Lỗi: Không thể kết nối. (${error.code})`;
+            }
+        }
+
+        async function handleSignIn() {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Lỗi xác thực:", error);
+            }
+        }
+        
+        // 2. LẮNG NGHE VÀ HIỂN THỊ BẢNG XẾP HẠNG (THỜI GIAN THỰC)
+        function setupLeaderboardListener() {
+            if (!db || !isAuthReady) return;
+
+            // Đường dẫn collection công cộng: /artifacts/{appId}/public/data/leaderboard
+            const collectionPath = `artifacts/${appId}/public/data/leaderboard`;
+            const leaderboardRef = collection(db, collectionPath);
+            
+            // LƯU Ý SỬA LỖI: Loại bỏ orderBy khỏi truy vấn Firestore để tránh lỗi index. Sẽ sắp xếp bằng JavaScript.
+            const leaderboardQuery = query(leaderboardRef);
+
+            const leaderboardDiv = document.getElementById('leaderboardList');
+
+            onSnapshot(leaderboardQuery, (snapshot) => {
+                leaderboardDiv.innerHTML = '';
+                
+                // 1. Sắp xếp dữ liệu trong JS để tránh lỗi index
+                const sortedScores = snapshot.docs
+                    .map(doc => ({ id: doc.id, ...doc.data() }))
+                    .sort((a, b) => {
+                        // Sắp xếp theo finalScore giảm dần
+                        if (b.finalScore !== a.finalScore) {
+                            return b.finalScore - a.finalScore;
+                        }
+                        // Nếu finalScore bằng nhau, sắp xếp theo timestamp giảm dần (mới nhất trước)
+                        // Firebase Timestamps cần được chuyển thành miliseconds để so sánh
+                        const timeA = a.timestamp ? a.timestamp.toMillis() : 0;
+                        const timeB = b.timestamp ? b.timestamp.toMillis() : 0;
+                        return timeB - timeA;
+                    });
+
+                const topScores = sortedScores.slice(0, 10); // Lấy top 10 đã sắp xếp
+                
+                if (topScores.length === 0) {
+                    leaderboardDiv.innerHTML = '<li class="text-center text-gray-500">Chưa có ai tham gia.</li>';
+                    return;
+                }
+
+                topScores.forEach((data, index) => { // data đã là object {id, ...data()}
+                    const rank = index + 1;
+                    const trophy = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
+                    
+                    const li = document.createElement('li');
+                    li.className = `p-3 rounded-lg shadow-md flex justify-between items-center transition duration-150 ${
+                        rank <= 3 ? 'bg-yellow-800/50 border-yellow-500' : 'bg-gray-700/50 border-gray-600'
+                    } ${data.userId === userId ? 'border-2 border-green-400' : 'border'}`;
+
+                    li.innerHTML = `
+                        <div class="flex items-center space-x-3">
+                            <span class="font-extrabold text-xl w-6 text-center text-white">${trophy || rank}</span>
+                            <span class="font-semibold">${data.playerName || 'Vô Danh'}</span>
+                            <code class="text-xs text-gray-400 hidden sm:block">(${data.userId.substring(0, 5)}...)</code>
+                        </div>
+                        <span class="font-extrabold text-lg text-yellow-400">${data.finalScore}</span>
+                    `;
+                    leaderboardDiv.appendChild(li);
+                });
+            }, (error) => {
+                console.error("Lỗi khi tải bảng xếp hạng:", error);
+                leaderboardDiv.innerHTML = '<li class="text-red-500 text-center">Lỗi tải BXH.</li>';
+            });
+        }
+        
+        // --- CƠ SỞ DỮ LIỆU CÂU HỎI MẶC ĐỊNH (CLIENT-SIDE) ---
+        const DEFAULT_QUIZ_DATA = [
+            {"id": 1, "text": "Hệ điều hành LINUX do ai phát triển?", "options": ["A. Bill Gates", "B. Steve Jobs", "C. Linus Torvalds", "D. Mark Zuckerberg"], "answer": "C. Linus Torvalds"},
+            {"id": 2, "text": "Đâu là phần mềm nền tảng điều khiển phần cứng?", "options": ["A. Microsoft Word", "B. Game Liên Minh", "C. Hệ điều hành", "D. Trình duyệt Chrome"], "answer": "C. Hệ điều hành"},
+            {"id": 3, "text": "Tác dụng của cơ chế 'plug & play'?", "options": ["A. Tăng tốc CPU", "B. Tự động nhận biết thiết bị ngoại vi", "C. Tăng RAM", "D. Tắt máy nhanh"], "answer": "B. Tự động nhận biết thiết bị ngoại vi"},
+            {"id": 4, "text": "Hệ điều hành nào sau đây là mã nguồn mở?", "options": ["A. Windows", "B. macOS", "C. Linux", "D. iOS"], "answer": "C. Linux"},
+            {"id": 5, "text": "Giới hạn thời gian cho mỗi câu hỏi là bao nhiêu giây?", "options": ["A. 10 giây", "B. 20 giây", "C. 30 giây", "D. 60 giây"], "answer": "B. 20 giây"}
+            // Thêm nhiều câu hỏi hơn để tăng độ khó!
+        ];
+
+        const POWER_UPS = {
+            'DOUBLE_POINTS': 'BONUS X2', 
+            'NO_DEDUCTION': 'MIỄN TRỪ',   
+            'SKIP_ALLOWED': 'VƯỢT QUA',   
+            'NORMAL': 'THƯỜNG'           
+        };
+        const QUESTION_TIME_LIMIT_SECONDS = 20;
+
+        // --- TRẠNG THÁI GAME ---
+        let state = {
+            playerName: '',
+            score: 40,
+            incorrectCount: 0,
+            questionIndex: 0,
+            questions: [],
+            totalQuestions: 0,
+            activePowerUp: POWER_UPS.NORMAL,
+            gameMode: 'main', 
+            redoHistory: [],
+            redoIndex: 0,
+            timerInterval: null,
+        };
+
+        const MAX_ERRORS = 10;
+        const NEXT_BUTTON = document.getElementById('next-button');
+        const SKIP_BUTTON = document.getElementById('skip-button');
+        const FEEDBACK_MSG = document.getElementById('feedback-message');
+        const OPTIONS_CONTAINER = document.getElementById('options-container');
+        const TIMER_DISPLAY = document.getElementById('timer-display');
+        
+        // SỬA LỖI: Định nghĩa các lớp mặc định dưới dạng MẢNG để có thể xóa từng token
+        const OPTION_BG_CLASSES = ['bg-gray-800', 'hover:bg-gray-700', 'border-gray-600'];
+        const OPTION_TEXT_DEFAULT = 'text-white';
+
+        // --- CHỨC NĂNG GAME ---
+
+        function getRandomPowerUp() {
+            const power_up_list = [
+                POWER_UPS.NORMAL, POWER_UPS.NORMAL, POWER_UPS.NORMAL, 
+                POWER_UPS.DOUBLE_POINTS, 
+                POWER_UPS.NO_DEDUCTION, 
+                POWER_UPS.SKIP_ALLOWED
+            ];
+            return power_up_list[Math.floor(Math.random() * power_up_list.length)];
+        }
+
+        function updateUI() {
+            document.getElementById('current-score').textContent = state.score;
+            document.getElementById('incorrect-count').textContent = state.incorrectCount;
+            
+            const scoreBar = document.getElementById('score-bar');
+            scoreBar.style.width = `${Math.max(0, state.score / 40) * 100}%`;
+            
+            let barColor = 'bg-green-500';
+            if (state.score <= 10) barColor = 'bg-red-500';
+            else if (state.score <= 25) barColor = 'bg-yellow-500';
+            scoreBar.className = `progress-bar-fill h-3 rounded-full ${barColor}`;
+            
+            const powerUpDisplay = document.getElementById('active-power-up');
+            powerUpDisplay.textContent = state.activePowerUp;
+            
+            const powerUpContainer = document.getElementById('power-up-display');
+            if (state.activePowerUp !== POWER_UPS.NORMAL) {
+                 powerUpContainer.classList.add('power-up-active', 'bg-cyan-500/30', 'border-cyan-400');
+            } else {
+                 powerUpContainer.classList.remove('power-up-active', 'bg-cyan-500/30', 'border-cyan-400');
+                 powerUpContainer.className = 'text-center text-sm font-extrabold rounded-lg p-2 mb-6 border border-gray-600 text-gray-400 bg-gray-800';
+            }
+
+            if (state.activePowerUp === POWER_UPS.SKIP_ALLOWED && state.gameMode === 'main') {
+                SKIP_BUTTON.classList.remove('hidden');
+            } else {
+                SKIP_BUTTON.classList.add('hidden');
+            }
+        }
+
+        function clearTimer() {
+            if (state.timerInterval) {
+                clearInterval(state.timerInterval);
+                state.timerInterval = null;
+                TIMER_DISPLAY.classList.remove('low-time');
+            }
+        }
+        
+        function startTimer() {
+            clearTimer();
+            let timeLeft = QUESTION_TIME_LIMIT_SECONDS;
+            TIMER_DISPLAY.textContent = timeLeft;
+            
+            state.timerInterval = setInterval(() => {
+                timeLeft -= 1;
+                TIMER_DISPLAY.textContent = timeLeft;
+                
+                if (timeLeft <= 5) {
+                    TIMER_DISPLAY.classList.add('low-time');
+                }
+
+                if (timeLeft <= 0) {
+                    handleTimeOut();
+                }
+            }, 1000);
+        }
+
+        function renderQuestion(question, container) {
+            container.innerHTML = '';
+            const options = question.options;
+            const shuffledOptions = options.sort(() => Math.random() - 0.5);
+
+            shuffledOptions.forEach((optionText, index) => {
+                const char = String.fromCharCode(65 + index);
+                
+                const button = document.createElement('button');
+                // SỬA LỖI: Thêm các lớp riêng lẻ vào nút
+                button.classList.add('w-full', 'text-left', 'p-3', 'border', 'rounded-lg', 'font-medium', 'option-button', ...OPTION_BG_CLASSES, OPTION_TEXT_DEFAULT, 'transition', 'duration-150', 'ease-in-out'); 
+                
+                button.setAttribute('data-answer', optionText);
+                button.textContent = `[${char}]. ${optionText}`;
+                
+                // Gán sự kiện click cho nút
+                button.onclick = () => selectOption(button, optionText);
+                container.appendChild(button);
+            });
+        }
+
+        function disableOptions(container) {
+            container.querySelectorAll('.option-button').forEach(btn => {
+                btn.disabled = true;
+                btn.classList.remove('hover:bg-gray-700');
+            });
+        }
+
+        function handleNextQuestion() {
+            clearTimer();
+
+            if (state.score <= 0 || state.incorrectCount >= MAX_ERRORS) {
+                endGame('thua');
+                return;
+            }
+            if (state.questionIndex >= state.totalQuestions) {
+                endGame('thắng');
+                return;
+            }
+
+            const currentQ = state.questions[state.questionIndex];
+            
+            document.getElementById('question-index').textContent = state.questionIndex + 1;
+            document.getElementById('question-text').textContent = currentQ.text;
+            
+            NEXT_BUTTON.disabled = true;
+            NEXT_BUTTON.textContent = 'Chọn đáp án để tiếp tục';
+            
+            FEEDBACK_MSG.textContent = '';
+            FEEDBACK_MSG.classList.add('opacity-0');
+
+            renderQuestion(currentQ, OPTIONS_CONTAINER);
+            updateUI();
+            startTimer();
+        }
+
+        /**
+         * Sửa lỗi: Hàm này đã được điều chỉnh để loại bỏ các lớp mặc định từng cái một (Fix InvalidCharacterError)
+         */
+        function selectOption(selectedButton, userAnswer) {
+            console.log(`Đã chọn đáp án: ${userAnswer}`);
+
+            // SỬA LỖI: Loại bỏ các lớp mặc định dưới dạng các token riêng lẻ
+            selectedButton.classList.remove(...OPTION_BG_CLASSES);
+            selectedButton.classList.add('bg-blue-600/50', 'border-blue-400');
+            
+            // Chuyển sang xử lý đáp án
+            processAnswer(userAnswer, false, false);
+        }
+
+        // XỬ LÝ CHUNG: HẾT GIỜ, CHỌN ĐÁP ÁN, BỎ QUA
+        async function processAnswer(userAnswer, isTimeout = false, isSkip = false) {
+            clearTimer();
+            disableOptions(OPTIONS_CONTAINER); // Vô hiệu hóa tất cả các nút ngay lập tức
+
+            const currentQ = state.questions[state.questionIndex];
+            const isCorrect = (userAnswer === currentQ.answer);
+            let scoreChange = 0;
+            let feedback = "";
+            let deduction = 3;
+            let bonus = 2;
+            
+            state.questionIndex++; // Luôn tăng index sau khi trả lời hoặc hết giờ
+
+            if (isTimeout) {
+                deduction = 5;
+                scoreChange = -deduction;
+                feedback = `⏰ HẾT GIỜ! Mất ${deduction} điểm. Đáp án đúng là: ${currentQ.answer}`;
+                state.incorrectCount++;
+            } else if (isSkip) {
+                scoreChange = -1;
+                feedback = `⏭️ Đã VƯỢT QUA! Mất 1 điểm. Đáp án đúng là: ${currentQ.answer}`;
+                state.incorrectCount++;
+            } else if (isCorrect) {
+                if (state.activePowerUp === POWER_UPS.DOUBLE_POINTS) {
+                    bonus += 2; 
+                }
+                scoreChange = bonus;
+                feedback = `✅ CHÍNH XÁC! Bạn nhận thêm ${bonus} điểm Tâm Lý.`;
+            } else {
+                if (state.activePowerUp === POWER_UPS.NO_DEDUCTION) {
+                    deduction = 0;
+                    feedback = `❌ SAI RỒI! Nhờ MIỄN TRỪ, bạn KHÔNG bị trừ điểm. Đáp án đúng: ${currentQ.answer}`;
+                } else {
+                    scoreChange = -deduction;
+                    feedback = `❌ SAI RỒI! Mất ${deduction} điểm Tâm Lý. Đáp án đúng là: ${currentQ.answer}`;
+                }
+                state.incorrectCount++;
+            }
+            
+            // Cập nhật trạng thái
+            state.score += scoreChange;
+            state.activePowerUp = getRandomPowerUp(); 
+
+            // Highlight đáp án
+            const allButtons = OPTIONS_CONTAINER.querySelectorAll('.option-button');
+            const correctButton = Array.from(allButtons).find(btn => btn.getAttribute('data-answer') === currentQ.answer);
+            
+            if (correctButton) {
+                 // SỬA LỖI: Loại bỏ các lớp mặc định dưới dạng các token riêng lẻ
+                 correctButton.classList.remove(...OPTION_BG_CLASSES, 'bg-blue-600/50', 'border-blue-400'); 
+                 correctButton.classList.add('bg-green-700', 'border-green-500');
+            }
+
+            if (!isCorrect && !isTimeout && !isSkip) {
+                const selectedButton = Array.from(allButtons).find(btn => btn.getAttribute('data-answer') === userAnswer);
+                if (selectedButton) {
+                    // Nếu đã được highlight trong selectOption, chỉ cần đổi màu sang đỏ
+                    selectedButton.classList.remove('bg-blue-600/50', 'border-blue-400');
+                    selectedButton.classList.add('bg-red-700', 'border-red-500');
+                }
+            }
+
+            FEEDBACK_MSG.textContent = feedback;
+            FEEDBACK_MSG.classList.remove('opacity-0');
+            NEXT_BUTTON.disabled = false;
+            NEXT_BUTTON.textContent = 'TIẾP TỤC';
+            
+            updateUI();
+        }
+
+        function handleTimeOut() {
+            processAnswer(null, true);
+        }
+        
+        NEXT_BUTTON.onclick = () => {
+             handleNextQuestion();
+        };
+
+        SKIP_BUTTON.onclick = () => {
+             if (state.activePowerUp === POWER_UPS.SKIP_ALLOWED) {
+                processAnswer(null, false, true);
+             }
+        };
+
+        // --- XỬ LÝ KẾT THÚC GAME VÀ ĐĂNG LÊN BXH ---
+        async function saveScoreToLeaderboard(finalScore, status) {
+            if (!db || !userId) {
+                console.error("Không thể lưu điểm, Firebase chưa sẵn sàng.");
+                return;
+            }
+
+            try {
+                // Đường dẫn public collection
+                const collectionPath = `artifacts/${appId}/public/data/leaderboard`;
+                const leaderboardRef = collection(db, collectionPath);
+
+                await addDoc(leaderboardRef, {
+                    playerName: state.playerName,
+                    finalScore: finalScore,
+                    userId: userId,
+                    status: status,
+                    timestamp: serverTimestamp()
+                });
+                console.log("Đã lưu điểm thành công lên Bảng Xếp Hạng Công Khai.");
+            } catch (e) {
+                console.error("Lỗi khi thêm điểm vào Firestore: ", e);
+            }
+        }
+
+        function endGame(status) {
+            clearTimer();
+            document.getElementById('quiz-screen').classList.add('hidden');
+            document.getElementById('start-screen').classList.add('hidden');
+            document.getElementById('end-screen').classList.remove('hidden');
+
+            const titleEl = document.getElementById('end-title');
+            const msgEl = document.getElementById('end-message');
+            const finalScore = Math.max(0, state.score);
+            document.getElementById('final-score-display').textContent = finalScore;
+
+            if (status === 'thua' || finalScore <= 0) {
+                titleEl.textContent = 'THẤT BẠI TỐI THƯỢNG!';
+                titleEl.classList.remove('text-green-600', 'neon-title');
+                titleEl.classList.add('text-red-600', 'text-shadow-red');
+                msgEl.textContent = `Tâm lý vững vàng đã cạn kiệt. Nhiệm vụ của ${state.playerName} đã thất bại.`;
+            } else {
+                titleEl.textContent = 'NHIỆM VỤ HOÀN THÀNH!';
+                titleEl.classList.remove('text-red-600', 'text-shadow-red');
+                titleEl.classList.add('text-green-600', 'neon-title');
+                msgEl.textContent = `${state.playerName} đã vượt qua mọi thử thách! Điểm của bạn đã được đăng lên BXH.`;
+            }
+            
+            // LƯU ĐIỂM VÀO FIRESTORE
+            saveScoreToLeaderboard(finalScore, status);
+        }
+        
+        // --- KHỞI TẠO VÀ SỰ KIỆN ---
+
+        document.getElementById('start-button').onclick = () => {
+            const name = document.getElementById('player-name-input').value.trim();
+            state.playerName = name || "Phi Hành Gia Vô Danh";
+            document.getElementById('player-name-display').textContent = state.playerName;
+
+            document.getElementById('start-screen').classList.add('hidden');
+            document.getElementById('quiz-screen').classList.remove('hidden');
+
+            // Khởi tạo Quiz Data
+            state.questions = DEFAULT_QUIZ_DATA.sort(() => Math.random() - 0.5); // Xáo trộn
+            state.totalQuestions = state.questions.length;
+            document.getElementById('total-questions').textContent = state.totalQuestions;
+            
+            handleNextQuestion();
+        };
+
+        document.getElementById('restart-button').onclick = () => {
+            // Reset trạng thái
+            state.score = 40;
+            state.incorrectCount = 0;
+            state.questionIndex = 0;
+            state.activePowerUp = POWER_UPS.NORMAL;
+            
+            document.getElementById('end-screen').classList.add('hidden');
+            document.getElementById('start-screen').classList.remove('hidden');
+            document.getElementById('player-name-input').value = state.playerName; // Giữ lại tên
+
+            updateUI();
+        };
+        
+        // Tải Firebase khi ứng dụng được tải
+        window.onload = function() {
+            initializeFirebase();
+            updateUI(); 
+        };
+        
+    </script>
+</head>
+<body class="p-4 md:p-8 min-h-screen flex flex-col items-center justify-center starry-background transition-colors duration-500 text-gray-100">
+
+    <div id="app" class="w-full max-w-2xl flex flex-col mt-12 mb-12">
+        
+        <!-- THÔNG TIN NGƯỜI DÙNG & COLLABORATION -->
+        <div id="authStatus" class="mb-4 bg-gray-800 p-3 rounded-lg border border-indigo-600 shadow-xl">
+            <p class="text-xs text-indigo-400 font-semibold">Mã Người Dùng Công Khai:</p>
+            <code id="userIdDisplay" class="break-all text-sm font-mono text-white">Đang kết nối...</code>
+        </div>
+        
+        <!-- Màn Hình Nhập Tên và Bảng Xếp Hạng -->
+        <div id="start-screen" class="quiz-card p-6 md:p-10 rounded-xl transition-all duration-500">
+            <h1 class="text-3xl font-extrabold text-center neon-title mb-6">KHỞI ĐỘNG HỆ THỐNG KIỂM TRA</h1>
+            
+            <input type="text" id="player-name-input" placeholder="Nhập tên phi hành gia của bạn" class="w-full p-3 border-2 border-gray-600 rounded-lg bg-gray-700 text-white focus:ring-neon-color focus:border-neon-color mb-6 shadow-inner">
+            
+            <button id="start-button" class="w-full btn-primary py-3 rounded-xl transition duration-200" disabled>
+                BẮT ĐẦU NHIỆM VỤ (Đang chờ kết nối server)
+            </button>
+            
+            <!-- Bảng Xếp Hạng Công Khai -->
+            <div class="mt-8 pt-4 border-t border-gray-700">
+                <h2 class="text-xl font-bold text-center text-yellow-500 mb-3">🚀 BẢNG XẾP HẠNG TÂM LÝ (TOP 10)</h2>
+                <ul id="leaderboardList" class="space-y-2 text-sm text-gray-300">
+                    <li class="text-center text-gray-500">Đang tải bảng xếp hạng...</li>
+                </ul>
+            </div>
+            
+        </div>
+
+        <!-- Màn Hình Game -->
+        <div id="quiz-screen" class="quiz-card p-6 md:p-10 rounded-xl hidden transition-all duration-500">
+            <!-- Header Game Stats -->
+            <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                <div class="text-base font-semibold text-gray-400">Phi hành gia: <span id="player-name-display" class="neon-title"></span></div>
+                <div class="text-base font-semibold text-gray-400">Câu hỏi: <span id="question-index" class="neon-title">1</span>/<span id="total-questions">10</span></div>
+            </div>
+
+            <!-- Score/Mental Progress Bar -->
+            <div class="mb-6">
+                <div class="flex justify-between text-sm font-medium text-gray-400">
+                    <span>Tâm Lý: <span id="current-score">40</span></span>
+                    <span>Lỗi: <span id="incorrect-count">0</span>/10</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-3">
+                    <div id="score-bar" class="progress-bar-fill h-3 rounded-full bg-green-500" style="width: 100%"></div>
+                </div>
+            </div>
+            
+            <!-- Timer Display -->
+            <div class="mb-6 text-center">
+                <div class="text-lg font-extrabold text-red-400">
+                    ⏳ THỜI GIAN: <span id="timer-display" class="neon-title text-3xl">20</span>s 
+                </div>
+            </div>
+            
+            <!-- Power Up Display -->
+            <div id="power-up-display" class="text-center text-sm font-extrabold rounded-lg p-2 mb-6 border border-gray-600 text-gray-400 bg-gray-800">
+                ✨ POWER-UP: <span id="active-power-up">THƯỜNG</span> ✨
+            </div>
+
+            <!-- Question and Options -->
+            <div class="mb-8">
+                <p id="question-text" class="text-xl font-bold mb-4 text-white">Đang tải dữ liệu...</p>
+                <div id="options-container" class="space-y-3">
+                    <!-- Options will be inserted here -->
+                </div>
+            </div>
+
+            <!-- Feedback Area -->
+            <div id="feedback-area" class="h-10 mb-4">
+                <p id="feedback-message" class="feedback-message text-center font-semibold opacity-0"></p>
+            </div>
+
+            <!-- Navigation Button -->
+            <button id="next-button" class="w-full btn-primary py-3 rounded-xl transition duration-200" disabled>
+                TIẾP TỤC
+            </button>
+            <button id="skip-button" class="w-full mt-2 bg-gray-600 text-white font-semibold py-2 rounded-xl hover:bg-gray-700 transition duration-200 shadow-sm hidden">
+                BỎ QUA (-1 Tâm Lý)
+            </button>
+        </div>
+
+        <!-- Màn Hình Kết Thúc -->
+        <div id="end-screen" class="quiz-card p-6 md:p-10 rounded-xl text-center hidden transition-all duration-500">
+            <h2 id="end-title" class="text-3xl font-extrabold mb-4 neon-title">NHIỆM VỤ HOÀN THÀNH!</h2>
+            <p id="end-message" class="text-xl text-gray-300 mb-6">Bạn đã giải cứu thành công Điểm Mười.</p>
+            <p class="text-2xl font-extrabold text-red-500">ĐIỂM TÂM LÝ CUỐI CÙNG: <span id="final-score-display">0</span></p>
+            <p class="text-yellow-400 mt-2 font-semibold">Điểm của bạn đã được đăng lên Bảng Xếp Hạng Công Khai!</p>
+            
+            <!-- Nút Chơi Lại -->
+            <button id="restart-button" class="w-full mt-8 btn-primary py-3 rounded-xl">CHƠI LẠI VÀ CẠNH TRANH</button>
+        </div>
+
+    </div>
+</body>
+</html>
